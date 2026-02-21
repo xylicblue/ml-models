@@ -23,6 +23,7 @@ RUN pip install --no-cache-dir \
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
+COPY model_weights/ ./model_weights/
 
 EXPOSE 8001
 
