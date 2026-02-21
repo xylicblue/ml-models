@@ -15,8 +15,8 @@ def get_peaks(
 
     Returns list of (row, col) coordinates of detected peaks.
     """
-    neighborhood = maximum_filter(density_map, size=neighborhood_size)
-    peaks = (density_map == neighborhood) & (density_map > threshold)
+    neighborhood = maximum_filter(np.asarray(density_map, dtype=np.float32), size=neighborhood_size)
+    peaks = (np.asarray(density_map, dtype=np.float32) == neighborhood) & (density_map > threshold)
     labeled, _ = label(peaks)
     slices = find_objects(labeled)
     points = [

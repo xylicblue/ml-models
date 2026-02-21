@@ -166,7 +166,7 @@ class WheatPlantCounter(BaseModel):
 
                 with torch.no_grad():
                     output, _ = self._count_model(t)
-                    density_map = output.squeeze().cpu().numpy()
+                    density_map = np.ascontiguousarray(output.squeeze().cpu().numpy(), dtype=np.float32)
                     pre_dis = self._size_model(ts)
                     pre_dis = float(pre_dis.item())
 
