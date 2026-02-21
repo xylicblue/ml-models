@@ -11,7 +11,7 @@ supabase==2.11.0
 # ML / Deep Learning
 torch>=2.0.0
 torchvision>=0.15.0
-numpy>=1.24.0
+numpy>=1.24.0,<2.0
 scipy>=1.11.0
 
 # Image processing
