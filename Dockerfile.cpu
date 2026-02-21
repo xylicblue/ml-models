@@ -1,4 +1,4 @@
-# CPU-only Dockerfile for development without GPU
+# CPU-only Dockerfile — for Railway and any non-GPU deployment
 FROM python:3.10-slim
 
 WORKDIR /app
@@ -8,9 +8,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgdal-dev \
     libgl1-mesa-glx \
     libglib2.0-0 \
+    gcc \
+    g++ \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
+
+# Install CPU-only PyTorch first (saves ~2 GB vs the default CUDA wheel)
+RUN pip install --no-cache-dir \
+    torch==2.2.2+cpu \
+    torchvision==0.17.2+cpu \
+    --index-url https://download.pytorch.org/whl/cpu
+
+# Install remaining dependencies (torch/torchvision already satisfied above)
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
