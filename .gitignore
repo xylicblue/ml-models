@@ -1,5 +1,4 @@
 .env
-model_weights/
 __pycache__/
 *.pyc
 /tmp/
