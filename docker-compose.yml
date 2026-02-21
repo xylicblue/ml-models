@@ -1,0 +1,55 @@
+services:
+  titiler:
+    image: ghcr.io/developmentseed/titiler:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../imagery:/data
+    environment:
+      - TITILER_CORS_ORIGINS=*
+
+  compute:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    volumes:
+      - ../imagery:/data
+      - ./model_weights:/app/model_weights
+    env_file:
+      - .env
+    environment:
+      - IMAGERY_DIR=/data
+      - MODEL_WEIGHTS_DIR=/app/model_weights
+      - COMPUTE_DISPATCH_MODE=local
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - titiler
+
+  # CPU-only variant (use: docker compose --profile cpu up compute-cpu)
+  compute-cpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    ports:
+      - "8001:8001"
+    volumes:
+      - ../imagery:/data
+      - ./model_weights:/app/model_weights
+    env_file:
+      - .env
+    environment:
+      - IMAGERY_DIR=/data
+      - MODEL_WEIGHTS_DIR=/app/model_weights
+      - COMPUTE_DISPATCH_MODE=local
+    profiles:
+      - cpu
+    depends_on:
+      - titiler

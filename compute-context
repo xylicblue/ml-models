@@ -1,0 +1,1104 @@
+# AgriPay Compute Service - Technical Specification
+**Repository:** `/compute-backend`  
+**Technology:** Python 3.10+ (FastAPI)  
+**Lead Engineer:** Compute Backend Team  
+**Goal:** Multi-source AI verification system for agricultural milestone validation
+
+---
+
+## 🎯 **ROLE IN AGRIPAY SYSTEM**
+
+The Compute Service is the **"AI Brain"** of AgriPay. It processes multi-source agricultural data and provides intelligent verification of loan milestones.
+
+### **Core Responsibilities:**
+
+1. **Multi-Source Milestone Verification** (PRIMARY - MVP Critical)
+   - Combines satellite imagery, drone footage, and IoT sensor data
+   - Runs ML models on each data source
+   - Generates composite AI verdict with confidence scores
+   - Updates database with verification results
+
+2. **Satellite Imagery Analysis** (MVP Critical)
+   - Integrates with AgroMonitoring API
+   - Calculates NDVI (Normalized Difference Vegetation Index)
+   - Detects vegetation changes over time
+   - Confirms crop planting, growth, fertilizer application
+
+3. **Drone Footage Processing** (MVP - Sample Data)
+   - Processes uploaded drone videos/images
+   - Runs crop health classification models
+   - Detects diseases, pests, crop stress
+   - For MVP: Use sample videos with basic analysis
+
+4. **IoT Data Ingestion & Analysis** (MVP - Sample Data)
+   - Receives sensor readings (soil moisture, nutrients, temperature)
+   - Performs statistical analysis and anomaly detection
+   - For MVP: Use manually seeded sample readings
+
+---
+
+## 🏗️ **ARCHITECTURE DESIGN**
+
+### **Key Principles:**
+- **Separation of Concerns:** Heavy ML workloads separated from main backend (Supabase)
+- **Dockerized Deployment:** Consistent environment across development and production
+- **Real ML Models:** No mocked verdicts - use actual pre-trained models where possible
+- **Scalable Design:** Built to handle multiple farms, multiple data sources
+
+### **Technology Stack:**
+- **Framework:** FastAPI (high-performance async Python)
+- **ML Libraries:** 
+  - `numpy`, `pandas` (data processing)
+  - `scikit-learn` (statistical analysis)
+  - `rasterio` (satellite image processing)
+  - `opencv-python` (drone video processing)
+  - `torch` or `tensorflow` (deep learning models - research phase)
+- **Database:** Supabase PostgreSQL (via `supabase-py` SDK)
+- **Authentication:** Supabase JWT validation
+- **Deployment:** Docker container (portable to Render/AWS/GCP)
+
+---
+
+## 📡 **API ENDPOINTS SPECIFICATION**
+
+### **1. POST /api/v1/process-satellite-data**
+**Purpose:** Process AgroMonitoring satellite data and store NDVI values
+
+**Called By:** Frontend (after fetching from AgroMonitoring API)
+
+**Authentication:** Supabase JWT
+
+**Request Body:**
+```json
+{
+  "farm_id": "uuid",
+  "agromonitoring_response": {
+    "dt": 1731164800,
+    "source": "sentinel_2",
+    "dc": 100,
+    "cl": 2.5,
+    "data": {
+      "mean": 0.58,
+      "std": 0.12,
+      "min": 0.21,
+      "max": 0.84,
+      "median": 0.60,
+      "p25": 0.48,
+      "p75": 0.71,
+      "num": 8542
+    }
+  }
+}
+```
+
+**What Frontend Does:**
+1. Calls AgroMonitoring API: `GET /agro/1.0/ndvi/history?polyid={id}&start={start}&end={end}&appid={key}`
+2. Receives array of NDVI data points
+3. For each data point, calls this endpoint to process and store
+
+**Logic:**
+1. Validate farm exists in database
+2. Extract NDVI values from AgroMonitoring response
+3. Query baseline NDVI (first reading after crop planting)
+4. Calculate NDVI change: `current_ndvi - baseline_ndvi`
+5. Determine interpretation:
+   - Change > 0.15: "Significant vegetation increase"
+   - Change 0.05-0.15: "Moderate vegetation growth"
+   - Change < 0.05: "Minimal change detected"
+6. Store in `satellite_data` table
+
+**Response:**
+```json
+{
+  "status": "processed",
+  "ndvi_mean": 0.58,
+  "ndvi_baseline": 0.42,
+  "ndvi_change": 0.16,
+  "interpretation": "Significant vegetation increase detected",
+  "cloud_coverage": 2.5,
+  "data_quality": 100
+}
+```
+
+**Database Write:**
+```sql
+INSERT INTO satellite_data (
+  farm_id, 
+  acquisition_date, 
+  ndvi_mean, 
+  ndvi_std,
+  ndvi_min,
+  ndvi_max,
+  cloud_coverage,
+  data_quality,
+  source,
+  raw_data
+)
+VALUES (...);
+```
+
+**Key AgroMonitoring API Details:**
+- **NDVI History API:** Returns time-series NDVI data calculated from Landsat/Sentinel satellites
+- **Data Format:** `data.mean` is the average NDVI for the polygon (most important value)
+- **NDVI Range:** -1 to +1 (typically 0.2-0.8 for crops)
+- **Cloud Coverage:** `cl` field (lower is better, < 10% is good)
+- **Data Quality:** `dc` field (0-100%, 100% = complete coverage)
+
+---
+
+### **2. POST /api/v1/process-drone-footage**
+**Purpose:** Analyze uploaded drone video/images for crop health
+
+**Called By:** Frontend (after drone footage uploaded to Supabase Storage)
+
+**Authentication:** Supabase JWT (farmer or admin)
+
+**Request Body:**
+```json
+{
+  "farm_id": "uuid",
+  "video_url": "https://supabase-storage.../drone-footage.mp4",
+  "capture_date": "2025-11-08T14:00:00Z",
+  "milestone_id": "uuid" (optional)
+}
+```
+
+**Logic:**
+1. Download video from Supabase Storage
+2. Extract key frames (every 5 seconds)
+3. Run crop health classification model on frames
+4. Detect:
+   - Crop health score (0-1)
+   - Disease presence (binary + confidence)
+   - Overall crop condition
+5. Store result in `milestone_evidence` table
+
+**Response:**
+```json
+{
+  "status": "processed",
+  "crop_health_score": 0.85,
+  "disease_detected": false,
+  "interpretation": "Crops appear healthy with good color",
+  "confidence": 0.92,
+  "frames_analyzed": 24
+}
+```
+
+**For MVP:** Use simple color-based analysis or pre-trained ImageNet model for basic classification
+
+---
+
+### **3. POST /api/v1/verify-milestone** (🔥 MAIN ENDPOINT - ASYNC)
+**Purpose:** Multi-source AI verification of milestone completion
+
+**Called By:** Frontend (when FARMER clicks "I completed milestone")
+
+**Authentication:** Supabase JWT (farmer role)
+
+**Flow:** ASYNC - Returns immediately, processes in background
+
+**Request Body:**
+```json
+{
+  "milestone_id": "uuid"
+}
+```
+
+**Logic Flow:**
+1. **Fetch milestone details** from database:
+   - `farm_id`, `milestone_type`, `expected_completion_date`, `crop_type`
+
+2. **Query satellite data** (last 14 days):
+   ```sql
+   SELECT * FROM satellite_data 
+   WHERE farm_id = ? 
+   AND acquisition_date >= milestone.expected_completion_date - INTERVAL '14 days'
+   ORDER BY acquisition_date DESC;
+   ```
+
+3. **Query drone footage** (most recent):
+   ```sql
+   SELECT * FROM milestone_evidence 
+   WHERE milestone_id = ? 
+   AND evidence_type = 'drone_footage'
+   ORDER BY created_at DESC LIMIT 1;
+   ```
+
+4. **Query IoT sensor readings** (last 14 days):
+   ```sql
+   SELECT * FROM iot_sensor_readings 
+   WHERE farm_id = ? 
+   AND timestamp >= milestone.expected_completion_date - INTERVAL '14 days';
+   ```
+
+5. **Run ML Analysis:**
+   - **Satellite:** NDVI change detection
+     - For "Fertilizer" milestone: Expect NDVI increase > 0.1
+     - For "Planting" milestone: Expect NDVI increase from baseline
+   - **Drone:** Crop health scoring
+     - Healthy crops = score > 0.7
+   - **IoT:** Soil nutrient analysis
+     - For "Fertilizer" milestone: Expect nitrogen spike > 20%
+
+6. **Combine Results:**
+   - Weight each source: Satellite (40%), Drone (35%), IoT (25%)
+   - Calculate overall confidence
+   - Generate verdict: `MILESTONE_COMPLETE`, `INSUFFICIENT_EVIDENCE`, `MILESTONE_FAILED`
+
+7. **Update database:**
+   ```sql
+   UPDATE milestones 
+   SET agro_augmentation = <result_json>, 
+       status = 'pending_verification',
+       submitted_at = NOW()
+   WHERE id = milestone_id;
+   ```
+
+**Response (Immediate):**
+```json
+{
+  "status": "verification_started",
+  "message": "Your milestone submission is being verified. Report will be available to verifier shortly.",
+  "estimated_time": "10-30 seconds"
+}
+```
+
+**Background Processing Result (Stored in milestones.agro_augmentation):**
+```json
+{
+  "verdict": "MILESTONE_COMPLETE",
+  "overall_confidence": 0.91,
+  "satellite_analysis": {
+    "ndvi_baseline": 0.42,
+    "ndvi_current": 0.58,
+    "ndvi_change": 0.16,
+    "interpretation": "Significant vegetation increase detected",
+    "confidence": 0.89,
+    "data_points": 7
+  },
+  "drone_analysis": {
+    "crop_health_score": 0.85,
+    "disease_detected": false,
+    "interpretation": "Crops appear healthy with good color",
+    "confidence": 0.92,
+    "last_capture_date": "2025-11-08"
+  },
+  "iot_analysis": {
+    "soil_nitrogen_baseline": 45,
+    "soil_nitrogen_current": 73,
+    "increase_pct": 28,
+    "interpretation": "Fertilizer application confirmed by nutrient spike",
+    "confidence": 0.94,
+    "readings_count": 96
+  },
+  "recommendation": "All indicators confirm milestone completion. Approve payment.",
+  "processed_at": "2025-11-09T16:45:30Z"
+}
+```
+
+**Insufficient Evidence Example:**
+```json
+{
+  "verdict": "INSUFFICIENT_EVIDENCE",
+  "overall_confidence": 0.0,
+  "satellite_analysis": {
+    "status": "NO_DATA",
+    "message": "No satellite images available for the last 14 days"
+  },
+  "drone_analysis": {
+    "status": "NO_DATA",
+    "message": "No drone footage uploaded for this milestone"
+  },
+  "iot_analysis": {
+    "status": "NO_DATA",
+    "message": "No IoT sensor readings found"
+  },
+  "recommendation": "Unable to verify milestone completion due to insufficient evidence. Please ensure all monitoring systems are active.",
+  "processed_at": "2025-11-09T16:45:30Z"
+}
+```
+
+**Note:** Verifier later reviews this stored report and approves/rejects accordingly.
+
+---
+
+### **4. POST /api/v1/iot-ingest**
+**Purpose:** Bulk ingestion of IoT sensor readings
+
+**Called By:** IoT devices, IoT gateway, or manual seeding script
+
+**Authentication:** Custom `X-API-TOKEN` header (device-specific)
+
+**Request Body:**
+```json
+{
+  "device_id": "uuid",
+  "readings": [
+    {
+      "timestamp": "2025-11-09T10:00:00Z",
+      "metric_type": "soil_moisture_kpa",
+      "value": 35.2
+    },
+    {
+      "timestamp": "2025-11-09T10:15:00Z",
+      "metric_type": "soil_nitrogen_ppm",
+      "value": 68.5
+    }
+  ]
+}
+```
+
+**Logic:**
+1. Validate `X-API-TOKEN` against `iot_devices.api_token` (hashed)
+2. Verify device_id exists and is active
+3. Bulk insert readings into `iot_sensor_readings` table
+4. Return success count
+
+**Response:**
+```json
+{
+  "status": "success",
+  "received_count": 2,
+  "rejected_count": 0
+}
+```
+
+**For MVP:** Manually seed sample readings using this endpoint for demo purposes
+
+---
+
+## 🔐 **AUTHENTICATION & SECURITY**
+
+### **Supabase JWT Validation (Endpoints 1-4):**
+```python
+from fastapi import Header, HTTPException
+from supabase import create_client
+
+async def verify_jwt(authorization: str = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Missing or invalid token")
+    
+    token = authorization.replace("Bearer ", "")
+    try:
+        user = supabase.auth.get_user(token)
+        return user
+    except Exception:
+        raise HTTPException(401, "Invalid token")
+```
+
+### **Device Token Validation (Endpoint 5):**
+```python
+import hashlib
+
+async def verify_device_token(x_api_token: str = Header(None), device_id: str):
+    if not x_api_token:
+        raise HTTPException(401, "Missing device token")
+    
+    # Hash token and compare with DB
+    hashed = hashlib.sha256(x_api_token.encode()).hexdigest()
+    device = supabase.table("iot_devices").select("*").eq("id", device_id).single().execute()
+    
+    if not device or device.data.get("api_token") != hashed:
+        raise HTTPException(401, "Invalid device token")
+```
+
+---
+
+## 🗂️ **DATABASE INTERACTIONS**
+
+### **Required Environment Variables:**
+```env
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+SUPABASE_ANON_KEY=your-anon-key (for JWT validation)
+AGROMONITORING_API_KEY=your-api-key
+```
+
+### **Tables Written To:**
+1. `farms` - Store `agromonitoring_polygon_id`
+2. `satellite_data` - Store NDVI calculations
+3. `milestone_evidence` - Store drone analysis results
+4. `milestones` - Update `agro_augmentation` with verification results
+5. `iot_sensor_readings` - Store sensor data
+
+---
+
+## 🧪 **ML MODELS & RESEARCH TASKS**
+
+### **Phase 1: MVP (Current Sprint)**
+**Goal:** Get working endpoints with basic ML analysis
+
+1. **Satellite NDVI Calculation:**
+   - Use `rasterio` library to read GeoTIFF images
+   - Calculate NDVI manually: `(NIR - Red) / (NIR + Red)`
+   - Threshold-based change detection (> 0.1 increase = significant)
+
+2. **Drone Crop Health (Simplified):**
+   - Extract frames using `opencv-python`
+   - Use color-based analysis (green pixel ratio)
+   - OR: Use pre-trained ResNet18 for basic classification
+   - Target: 70%+ accuracy acceptable for MVP
+
+3. **IoT Analysis (Statistical):**
+   - Simple baseline comparison
+   - Detect spikes > 20% for nutrient application
+   - No complex ML needed initially
+
+### **Phase 2: Research & Refinement (Post-MVP)**
+**Goal:** Improve accuracy with specialized models
+
+1. **Satellite Analysis:**
+   - Research: Sentinel Hub API for higher resolution
+   - Implement: Time-series NDVI trend analysis
+   - Advanced: Crop classification using Random Forest
+
+2. **Drone Analysis:**
+   - Research: PlantVillage dataset for disease detection
+   - Implement: Transfer learning with EfficientNet-B0
+   - Advanced: Object detection for pest identification
+
+3. **IoT Analysis:**
+   - Research: LSTM for time-series anomaly detection
+   - Implement: Predictive models for irrigation timing
+
+---
+
+## 🐳 **DOCKER SETUP**
+
+### **Dockerfile:**
+```dockerfile
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install system dependencies for image processing
+RUN apt-get update && apt-get install -y \
+    libgdal-dev \
+    libgl1-mesa-glx \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 8000
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+### **requirements.txt:**
+```txt
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+supabase==2.0.3
+python-multipart==0.0.6
+python-dotenv==1.0.0
+numpy==1.24.3
+pandas==2.0.3
+rasterio==1.3.9
+opencv-python-headless==4.8.1.78
+scikit-learn==1.3.2
+requests==2.31.0
+Pillow==10.1.0
+```
+
+---
+
+## 🚀 **DEPLOYMENT PLAN**
+
+### **Development:**
+```bash
+# Local testing
+docker build -t agripay-compute .
+docker run -p 8000:8000 --env-file .env agripay-compute
+```
+
+### **Production (Options):**
+1. **Render:** Deploy Docker container (free tier available)
+2. **Google Cloud Run:** Serverless container deployment
+3. **AWS ECS:** Elastic Container Service
+4. **Heroku:** Container registry
+
+**Recommendation:** Start with Render for MVP (easy deployment, free tier)
+
+---
+
+## ✅ **MVP IMPLEMENTATION CHECKLIST**
+
+### **Week 1: Foundation**
+- [ ] Set up FastAPI project structure
+- [ ] Create Dockerfile and test local deployment
+- [ ] Implement Supabase JWT authentication middleware
+- [ ] Set up database connection with `supabase-py`
+- [ ] Create health check endpoint: `GET /health`
+
+### **Week 2: AgroMonitoring Integration**
+- [ ] Research AgroMonitoring API documentation
+- [ ] Implement `POST /api/v1/register-farm-monitoring`
+- [ ] Test polygon registration with sample farm
+- [ ] Implement `POST /api/v1/process-satellite-image`
+- [ ] Test NDVI calculation with sample GeoTIFF
+
+### **Week 3: Multi-Source Verification**
+- [ ] Implement `POST /api/v1/process-drone-footage` (basic version)
+- [ ] Implement `POST /api/v1/iot-ingest`
+- [ ] Seed sample IoT data for demo
+- [ ] **Implement `POST /api/v1/verify-milestone`** (CRITICAL)
+- [ ] Test end-to-end verification flow
+
+### **Week 4: Testing & Refinement**
+- [ ] Deploy to Render/GCP
+- [ ] Integration testing with frontend
+- [ ] Performance testing (response times < 5s)
+- [ ] Error handling and logging
+- [ ] Documentation and API examples
+
+---
+
+## 🎯 **SUCCESS CRITERIA FOR MVP**
+
+1. **AgroMonitoring Integration Works:**
+   - Can register farm polygons
+   - Can fetch and process satellite images
+   - NDVI calculation is accurate (validated against AgroMonitoring's own NDVI)
+
+2. **Multi-Source Verification Endpoint Works:**
+   - Accepts milestone_id as input
+   - Returns composite verdict with confidence scores
+   - Response time < 10 seconds
+
+3. **Demo Flow Complete:**
+   - Verifier clicks "Review" → triggers verification
+   - Shows satellite NDVI graph (real data)
+   - Shows drone footage analysis (sample video)
+   - Shows IoT sensor charts (sample data)
+   - AI verdict displayed with 90%+ confidence
+
+4. **Deployment Successful:**
+   - Docker container runs without errors
+   - Public URL accessible from frontend
+   - All endpoints return expected responses
+
+---
+
+## 📝 **NOTES & REMINDERS**
+
+- **Keep it Simple for MVP:** Focus on getting one crop (Wheat) working perfectly before adding others
+- **Real vs. Sample Data:** Satellite = REAL, Drone/IoT = SAMPLE for MVP
+- **ML Model Selection:** Research phase comes AFTER basic endpoints are working
+- **Error Handling:** Always return clear error messages for debugging
+- **Logging:** Log all API calls, processing times, and errors for troubleshooting
+
+---
+
+## 🚀 **1-DAY MVP IMPLEMENTATION ROADMAP**
+
+### **⚠️ CRITICAL CONSTRAINT: Complete working demo in 1 day (8-10 hours)**
+
+**Team:** Compute Backend + Blockchain (SAME PEOPLE)  
+**Goal:** Show verifier approving milestone → Real blockchain transaction  
+**Strategy:** Mock EVERYTHING except blockchain transaction
+
+---
+
+## **⏰ HOUR-BY-HOUR IMPLEMENTATION PLAN**
+
+### **🔥 HOUR 0-1: Database Setup (CRITICAL - BLOCKING EVERYTHING)**
+
+**Priority:** ABSOLUTE HIGHEST  
+**Owner:** YOU  
+**Why:** Everything else fails without data
+
+**Simplified Tasks:**
+1. **Enable PostGIS:** Run `CREATE EXTENSION postgis;` in Supabase SQL Editor
+2. **Create ONLY 3 tables** (skip the rest for MVP):
+   ```sql
+   -- milestones table (add to existing schema)
+   CREATE TABLE milestones (
+     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+     farm_id UUID REFERENCES farms(id),
+     name TEXT NOT NULL,
+     milestone_type TEXT NOT NULL,
+     amount INTEGER NOT NULL,
+     status TEXT DEFAULT 'not_started',
+     agro_augmentation JSONB,
+     created_at TIMESTAMPTZ DEFAULT NOW()
+   );
+   
+   -- transactions table (for blockchain records)
+   CREATE TABLE transactions (
+     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+     milestone_id UUID REFERENCES milestones(id),
+     tx_hash TEXT NOT NULL,
+     amount INTEGER NOT NULL,
+     status TEXT DEFAULT 'pending',
+     created_at TIMESTAMPTZ DEFAULT NOW()
+   );
+   
+   -- Update profiles table (add wallet_address if not exists)
+   ALTER TABLE profiles ADD COLUMN IF NOT EXISTS wallet_address TEXT;
+   ```
+
+3. **Seed ONE demo scenario:**
+   ```sql
+   -- 1. Update existing farmer with wallet
+   UPDATE profiles 
+   SET wallet_address = '0xYOUR_FARMER_WALLET' 
+   WHERE email = 'farmer@test.com';
+   
+   -- 2. Create/update verifier
+   INSERT INTO profiles (email, full_name, role, wallet_address)
+   VALUES ('verifier@test.com', 'Demo Verifier', 'verifier', '0xYOUR_VERIFIER_WALLET')
+   ON CONFLICT (email) DO UPDATE SET role = 'verifier';
+   
+   -- 3. Create ONE milestone (use existing farm_id)
+   INSERT INTO milestones (farm_id, name, milestone_type, amount, status)
+   VALUES (
+     (SELECT id FROM farms LIMIT 1),
+     'Fertilizer Application',
+     'fertilizer',
+     20000,
+     'not_started'
+   );
+   ```
+
+**Deliverable:** 1 farmer, 1 verifier, 1 milestone (15 minutes)
+
+---
+
+### **🔥 HOUR 1-2: Smart Contract (CRITICAL)**
+
+**Priority:** SECOND HIGHEST  
+**Owner:** YOU (Blockchain Team)  
+**Why:** Need contract address for Edge Function
+
+**Simplified Tasks:**
+1. **Create minimal contract** (in `/contract` folder):
+   ```solidity
+   // SPDX-License-Identifier: MIT
+   pragma solidity ^0.8.0;
+   
+   contract AgriPayEscrow {
+       mapping(string => uint256) public loans;
+       
+       event MilestoneReleased(string milestoneId, address farmer, uint256 amount);
+       
+       function lockLoan(string memory loanId) public payable {
+           loans[loanId] += msg.value;
+       }
+       
+       function releaseMilestone(
+           string memory milestoneId,
+           address payable farmer,
+           uint256 amount
+       ) public {
+           require(address(this).balance >= amount, "Insufficient balance");
+           farmer.transfer(amount);
+           emit MilestoneReleased(milestoneId, farmer, amount);
+       }
+   }
+   ```
+
+2. **Deploy via Remix IDE** (fastest method):
+   - Copy contract to https://remix.ethereum.org
+   - Connect MetaMask (Sepolia network)
+   - Get testnet ETH from https://sepoliafaucet.com
+   - Deploy contract
+   - Copy contract address
+
+3. **Lock demo funds:**
+   - Call `lockLoan("demo-loan-1")` with 0.001 ETH
+
+**Deliverable:** Deployed contract with address (30 minutes)
+
+---
+
+### **🔥 HOUR 2-4: Compute Backend (MOCKED - NO REAL ML)**
+
+**Priority:** THIRD  
+**Owner:** YOU  
+**Why:** Needed for verifier to see "verification report"
+
+**Ultra-Simplified Tasks:**
+1. **Create FastAPI project:**
+   ```bash
+   cd compute-backend
+   # Create main.py
+   ```
+
+2. **Write ONE endpoint with HARDCODED response:**
+   ```python
+   from fastapi import FastAPI, HTTPException
+   from supabase import create_client
+   import os
+   
+   app = FastAPI()
+   supabase = create_client(
+       os.getenv("SUPABASE_URL"),
+       os.getenv("SUPABASE_KEY")
+   )
+   
+   @app.post("/api/v1/verify-milestone")
+   async def verify_milestone(milestone_id: str):
+       # HARDCODED verification result (no ML!)
+       report = {
+           "verdict": "MILESTONE_COMPLETE",
+           "overall_confidence": 0.91,
+           "satellite_analysis": {
+               "ndvi_baseline": 0.42,
+               "ndvi_current": 0.58,
+               "ndvi_change": 0.16,
+               "interpretation": "Significant vegetation increase detected",
+               "confidence": 0.89
+           },
+           "drone_analysis": {
+               "crop_health_score": 0.85,
+               "disease_detected": False,
+               "interpretation": "Crops appear healthy",
+               "confidence": 0.92
+           },
+           "iot_analysis": {
+               "soil_nitrogen_increase_pct": 28,
+               "interpretation": "Fertilizer application confirmed",
+               "confidence": 0.94
+           }
+       }
+       
+       # Store in database
+       supabase.table("milestones").update({
+           "agro_augmentation": report,
+           "status": "pending_verification"
+       }).eq("id", milestone_id).execute()
+       
+       return {"status": "verified", "report": report}
+   ```
+
+3. **Run locally:**
+   ```bash
+   pip install fastapi uvicorn supabase
+   uvicorn main:app --reload
+   ```
+
+**Deliverable:** One working endpoint that returns fake data (45 minutes)
+
+---
+
+### **🔥 HOUR 4-6: Frontend Verifier Portal (MINIMAL)**
+
+**Priority:** FOURTH  
+**Owner:** Frontend Team (or YOU if solo)  
+**Why:** Need UI for verifier to approve
+
+**Ultra-Simplified Tasks:**
+1. **Create `VerifierDashboard.jsx`:**
+   ```jsx
+   // Show ONE hardcoded milestone
+   const milestone = {
+     id: "milestone-id-from-db",
+     name: "Fertilizer Application",
+     farm_name: "Green Valley Farm",
+     amount: 20000,
+     status: "pending_verification"
+   };
+   
+   return (
+     <div>
+       <h1>Pending Milestones</h1>
+       <button onClick={() => navigate(`/verify/${milestone.id}`)}>
+         Review Milestone
+       </button>
+     </div>
+   );
+   ```
+
+2. **Create `VerificationDetailPage.jsx`:**
+   ```jsx
+   // Fetch report from DB
+   const { data } = await supabase
+     .from("milestones")
+     .select("agro_augmentation")
+     .eq("id", milestoneId)
+     .single();
+   
+   // Display static images (no real graphs)
+   return (
+     <div>
+       <h2>Verification Report</h2>
+       <img src="/ndvi-graph-fake.png" /> {/* Static image */}
+       <p>Satellite: {data.agro_augmentation.satellite_analysis.interpretation}</p>
+       <p>Drone: {data.agro_augmentation.drone_analysis.interpretation}</p>
+       <p>IoT: {data.agro_augmentation.iot_analysis.interpretation}</p>
+       
+       <button onClick={handleApprove}>Approve & Release Payment</button>
+     </div>
+   );
+   ```
+
+**Deliverable:** Verifier can view report and click approve (1 hour)
+
+---
+
+### **🔥 HOUR 6-8: Blockchain Integration (CRITICAL)**
+
+**Priority:** FIFTH  
+**Owner:** YOU (Blockchain Team)  
+**Why:** This is the ONLY real part of the demo
+
+**Tasks:**
+1. **Create Edge Function** (`supabase-backend/functions/triggerPayment/index.ts`):
+   ```typescript
+   import { ethers } from "ethers";
+   
+   Deno.serve(async (req) => {
+     const { milestone_id } = await req.json();
+     
+     // 1. Fetch milestone data
+     const milestone = await supabase
+       .from("milestones")
+       .select("*, profiles(*)")
+       .eq("id", milestone_id)
+       .single();
+     
+     // 2. Connect to contract
+     const provider = new ethers.JsonRpcProvider(Deno.env.get("SEPOLIA_RPC_URL"));
+     const wallet = new ethers.Wallet(Deno.env.get("PRIVATE_KEY"), provider);
+     const contract = new ethers.Contract(
+       Deno.env.get("CONTRACT_ADDRESS"),
+       ["function releaseMilestone(string, address, uint256)"],
+       wallet
+     );
+     
+     // 3. Call contract
+     const amountWei = ethers.parseEther((milestone.amount / 1000000).toString());
+     const tx = await contract.releaseMilestone(
+       milestone_id,
+       milestone.profiles.wallet_address,
+       amountWei
+     );
+     
+     await tx.wait();
+     
+     // 4. Record transaction
+     await supabase.table("transactions").insert({
+       milestone_id,
+       tx_hash: tx.hash,
+       amount: milestone.amount,
+       status: "confirmed"
+     });
+     
+     return new Response(JSON.stringify({ tx_hash: tx.hash }));
+   });
+   ```
+
+2. **Set Supabase secrets:**
+   ```bash
+   supabase secrets set SEPOLIA_RPC_URL=https://sepolia.infura.io/v3/YOUR_KEY
+   supabase secrets set PRIVATE_KEY=0xYOUR_PRIVATE_KEY
+   supabase secrets set CONTRACT_ADDRESS=0xYOUR_CONTRACT_ADDRESS
+   ```
+
+3. **Update frontend approve button:**
+   ```jsx
+   const handleApprove = async () => {
+     const { data } = await supabase.functions.invoke('triggerPayment', {
+       body: { milestone_id: milestoneId }
+     });
+     
+     alert(`Payment sent! TX: ${data.tx_hash}`);
+   };
+   ```
+
+**Deliverable:** Real blockchain transaction on approve (1.5 hours)
+
+---
+
+### **🔥 HOUR 8-10: Testing & Demo Prep**
+
+**Tasks:**
+1. **End-to-end test:**
+   - Verifier logs in → sees milestone → clicks review → sees report → clicks approve → blockchain TX executes
+2. **Verify on Etherscan:** Check transaction appears
+3. **Practice demo 5 times**
+4. **Create backup screenshots** (in case live demo fails)
+
+**Deliverable:** Working demo ready to present
+
+---
+
+---
+
+## 🎯 **1-DAY MVP STRATEGY: WHAT TO MOCK vs. WHAT MUST BE REAL**
+
+### **✅ MUST BE REAL (Non-Negotiable):**
+1. **Smart contract deployment** - Need real Sepolia contract address
+2. **Blockchain transaction** - Must show real TX on Etherscan
+3. **Database** - Need actual Supabase tables with data
+4. **Edge Function** - Must actually call smart contract
+
+### **🎭 CAN BE MOCKED (Time Savers):**
+1. **ML Models** - Return hardcoded confidence scores
+2. **AgroMonitoring API** - Use fake NDVI data
+3. **Drone processing** - Show sample image, fake analysis
+4. **IoT sensors** - Display fake chart with hardcoded data
+5. **Async processing** - Make it synchronous (simpler)
+6. **Multiple crops** - Only support Fertilizer milestone
+7. **Authentication** - Skip JWT validation (use Service Role Key)
+
+### **🎨 VISUAL POLISH (Use Static Images):**
+- NDVI graph: Create in Excel, save as PNG
+- Drone footage: Use YouTube farm video screenshot
+- IoT chart: Create in Google Sheets, save as PNG
+- Show these images in verifier UI (no real data processing)
+
+---
+
+## 🚨 **CRITICAL SHORTCUTS FOR 1-DAY DEADLINE**
+
+### **Database Shortcuts:**
+- Skip `loans`, `crops`, `satellite_data`, `iot_devices` tables
+- Only create `milestones` and `transactions` tables
+- Manually insert 1 milestone via SQL (no API needed)
+
+### **Smart Contract Shortcuts:**
+- Use Remix IDE (no Hardhat setup needed)
+- Deploy directly from browser
+- No need to verify on Etherscan (just deploy)
+
+### **Compute Backend Shortcuts:**
+- ONE endpoint only: `POST /api/v1/verify-milestone`
+- Return hardcoded JSON (no ML processing)
+- No auth middleware (accept all requests)
+- Run locally with `uvicorn` (no Docker needed)
+
+### **Frontend Shortcuts:**
+- Hardcode milestone ID in verifier dashboard
+- Skip farmer portal updates (not needed for demo)
+- Use inline styles (no CSS polish)
+- Static images for all graphs
+
+---
+
+## ⏰ **REALISTIC TIMELINE FOR 1 DAY**
+
+### **Morning (4 hours):**
+- ✅ Hour 1: Database + seed data
+- ✅ Hour 2: Smart contract deployment
+- ✅ Hour 3-4: Compute backend endpoint (mocked)
+
+### **Afternoon (4 hours):**
+- ✅ Hour 5-6: Verifier UI pages
+- ✅ Hour 7-8: Edge Function + blockchain integration
+
+### **Evening (2 hours):**
+- ✅ Hour 9: End-to-end testing
+- ✅ Hour 10: Demo practice + backup plan
+
+---
+
+## 🎬 **DEMO SCRIPT (30 seconds)**
+
+**Setup:** Two browser windows (farmer, verifier)
+
+**Live Actions:**
+1. **Show Problem** (5s): "Farmers misuse agricultural loans"
+2. **Show Verifier Login** (5s): Log in as verifier
+3. **Show Milestone** (5s): Click "Review" on pending milestone
+4. **THE MONEY SHOT** (10s): Show verification report with satellite/drone/IoT data, AI says "91% confident"
+5. **Click Approve** (5s): Click approve button, show "Payment processing..."
+6. **Show Blockchain TX** (10s): Display TX hash, open Etherscan, show confirmed transaction
+
+**Key Message:** "Automated verification + blockchain transparency = no fraud"
+
+---
+
+## 📋 **STARTUP CHECKLIST (Use This Tomorrow Morning)**
+
+### **Before You Start Coding:**
+- [ ] Get testnet ETH from Sepolia faucet (takes 5 min)
+- [ ] Create Supabase project (if not exists)
+- [ ] Get wallet addresses for farmer + verifier (MetaMask)
+- [ ] Download sample farm images (Google Images)
+- [ ] Create fake NDVI graph in Excel
+
+### **Tools You Need:**
+- [ ] Remix IDE (https://remix.ethereum.org)
+- [ ] MetaMask with Sepolia network
+- [ ] Supabase dashboard access
+- [ ] Python 3.10+ with pip
+- [ ] Node.js for Edge Function (if deploying to Supabase)
+
+### **URLs to Have Ready:**
+- [ ] Sepolia Etherscan: https://sepolia.etherscan.io
+- [ ] Sepolia Faucet: https://sepoliafaucet.com
+- [ ] Supabase dashboard
+- [ ] Your deployed contract address
+
+---
+
+## 🚀 **EXECUTION PLAN: START HERE TOMORROW**
+
+### **Step 1: Database (30 minutes)**
+```sql
+-- Run these in Supabase SQL Editor:
+
+CREATE TABLE milestones (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  farm_id UUID REFERENCES farms(id),
+  name TEXT NOT NULL,
+  amount INTEGER NOT NULL,
+  status TEXT DEFAULT 'not_started',
+  agro_augmentation JSONB,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE transactions (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  milestone_id UUID REFERENCES milestones(id),
+  tx_hash TEXT NOT NULL,
+  amount INTEGER NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE profiles ADD COLUMN wallet_address TEXT;
+
+-- Seed data
+INSERT INTO milestones (farm_id, name, amount, status)
+VALUES ((SELECT id FROM farms LIMIT 1), 'Fertilizer Application', 20000, 'not_started');
+```
+
+### **Step 2: Smart Contract (30 minutes)**
+1. Go to Remix IDE
+2. Copy contract code from document
+3. Deploy to Sepolia
+4. Save contract address
+
+### **Step 3: Compute Backend (1 hour)**
+```bash
+cd compute-backend
+pip install fastapi uvicorn supabase-py
+# Create main.py with hardcoded endpoint
+uvicorn main:app --reload
+```
+
+### **Step 4: Frontend (2 hours)**
+- Create VerifierDashboard.jsx
+- Create VerificationDetailPage.jsx
+- Add approve button
+
+### **Step 5: Edge Function (1.5 hours)**
+- Write triggerPayment function
+- Deploy to Supabase
+- Test with milestone_id
+
+### **Step 6: Test (1 hour)**
+- Full flow end-to-end
+- Check Etherscan
+
+**TOTAL: 6.5 hours (leaves 1.5 hours buffer for bugs)**
+
+---
+
+**Last Updated:** November 9, 2025  
+**Document Status:** FINAL - Ready for Implementation
