@@ -15,8 +15,8 @@ COPY requirements.txt .
 
 # Install CPU-only PyTorch first (saves ~2 GB vs the default CUDA wheel)
 RUN pip install --no-cache-dir \
-    torch==2.2.2+cpu \
-    torchvision==0.17.2+cpu \
+    torch==2.3.0+cpu \
+    torchvision==0.18.0+cpu \
     --index-url https://download.pytorch.org/whl/cpu
 
 # Install remaining dependencies (torch/torchvision already satisfied above)

@@ -9,8 +9,8 @@ python-multipart==0.0.20
 supabase==2.11.0
 
 # ML / Deep Learning
-torch>=2.0.0
-torchvision>=0.15.0
+torch>=2.3.0
+torchvision>=0.18.0
 numpy>=2.0.0
 scipy>=1.14.0
 
